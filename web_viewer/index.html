@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>协同审阅平台 - 网页预览器</title>
+    <link rel="stylesheet" href="./style.css?v=reviewhub-20260605-approval" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <h1>协同审阅平台</h1>
+          <p id="projectMeta">拖入 .revpack 查看返修</p>
+        </div>
+        <div class="topbar-actions">
+          <div class="mode-switch" role="group" aria-label="查看模式">
+            <button id="reviewModeButton" class="is-active" type="button">审阅</button>
+            <button id="tableModeButton" type="button">表格</button>
+            <button id="historyModeButton" type="button">历史</button>
+          </div>
+          <label class="file-button">
+            导入 .revpack
+            <input id="fileInput" type="file" accept=".revpack,.zip" multiple />
+          </label>
+          <label class="file-button">
+            打开工程
+            <input id="projectInput" type="file" accept=".reviewhub,.zip" />
+          </label>
+          <button id="restoreLocalButton" type="button">恢复本机工程</button>
+          <button id="saveLocalButton" type="button">保存本机</button>
+          <button id="exportRevpackButton" type="button">导出revpack</button>
+          <button id="exportProjectButton" type="button">导出工程</button>
+          <button id="exportTableButton" type="button">导出表格</button>
+          <button id="exportSelectedProjectButton" type="button">导出选中工程</button>
+          <button id="cgtwPreviewButton" type="button">CGTW预检</button>
+          <button id="cgtwSyncButton" type="button">CGTW同步</button>
+          <button id="clearButton" type="button">清空</button>
+        </div>
+      </header>
+
+      <section id="dropZone" class="drop-zone">
+        <div>
+          <strong>拖入 .revpack / .reviewhub</strong>
+          <span>本机解包预览，多个包自动合并历史。</span>
+        </div>
+      </section>
+
+      <section class="filters">
+        <input id="searchInput" type="search" placeholder="搜索镜头号、意见、关键词" />
+        <select id="episodeFilter"></select>
+        <select id="sceneFilter"></select>
+        <select id="departmentFilter"></select>
+        <select id="statusFilter">
+          <option value="">全部状态</option>
+          <option value="pending">待处理</option>
+          <option value="done">已完成</option>
+          <option value="approved">已通过</option>
+        </select>
+      </section>
+
+      <section id="reviewView" class="review-layout">
+        <div class="player-panel">
+          <div class="player-header">
+            <div>
+              <h2 id="playerTitle">审阅播放器</h2>
+              <p id="playerSubtitle">选择一个镜头开始查看</p>
+            </div>
+            <div class="playback-controls">
+              <button id="prevButton" type="button">上一镜</button>
+              <button id="playButton" type="button">播放</button>
+              <button id="pauseButton" type="button">暂停</button>
+              <button id="nextButton" type="button">下一镜</button>
+            </div>
+          </div>
+          <div id="mediaStage" class="media-stage">
+            <div class="empty-state">暂无媒体</div>
+          </div>
+          <div class="timeline-wrap">
+            <div class="timeline-title">镜头时间线</div>
+            <div id="timeline" class="timeline"></div>
+          </div>
+        </div>
+
+        <aside class="detail-panel">
+          <div class="detail-heading">
+            <h2 id="detailShot">未选择镜头</h2>
+            <span id="detailDept"></span>
+          </div>
+          <div id="detailMetaLine" class="detail-meta-line">-</div>
+          <div class="detail-actions">
+            <button id="approveShotButton" type="button" disabled>通过当前镜头</button>
+          </div>
+
+          <label class="version-picker">
+            <span>修改意见版本</span>
+            <select id="detailVersionSelect"></select>
+          </label>
+
+          <section class="source-panel">
+            <h3>源文件位置</h3>
+            <div id="detailSourceInfo" class="source-info">未选择镜头</div>
+          </section>
+
+          <section>
+            <h3>修改意见</h3>
+            <div id="fullReview" class="text-box"></div>
+          </section>
+          <section>
+            <h3>整理结果</h3>
+            <div id="simpleReview" class="text-box compact"></div>
+          </section>
+          <section>
+            <h3>参考</h3>
+            <div id="referencePreview" class="reference-preview">无参考图片</div>
+            <div id="referenceList" class="reference-list"></div>
+          </section>
+        </aside>
+      </section>
+
+      <section id="tableView" class="table-panel hidden">
+        <div class="table-header">
+          <div>
+            <h2>录入表格</h2>
+            <p id="tableCount">0 条记录</p>
+          </div>
+          <button id="focusReviewButton" type="button">查看当前镜头</button>
+        </div>
+        <div class="table-scroll">
+          <table class="review-table">
+            <thead>
+              <tr>
+                <th><input id="selectAllRowsCheckbox" type="checkbox" aria-label="选择全部可见镜头" /></th>
+                <th>截图</th>
+                <th>集号</th>
+                <th>场号</th>
+                <th>时间码</th>
+                <th>镜头号</th>
+                <th>revpack地址</th>
+                <th>完整意见</th>
+                <th>简化意见</th>
+                <th>关键词</th>
+                <th>部门</th>
+                <th>参考</th>
+                <th>媒体</th>
+              </tr>
+            </thead>
+            <tbody id="reviewTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="historyView" class="history-layout hidden">
+        <aside class="history-list-panel">
+          <div class="history-panel-header">
+            <h2>镜头归宗</h2>
+            <p id="historyCount">0 个镜头</p>
+          </div>
+          <div id="shotGroupList" class="shot-group-list"></div>
+        </aside>
+        <section class="history-detail-panel">
+          <div class="history-panel-header">
+            <div>
+              <h2 id="historyShotTitle">未选择镜头</h2>
+              <p id="historyShotMeta">加载多个 .revpack 后自动形成版本历史</p>
+            </div>
+            <button id="openHistoryInReviewButton" type="button">审阅当前版本</button>
+          </div>
+          <div id="versionHistory" class="version-history"></div>
+        </section>
+      </section>
+    </main>
+
+    <script src="./vendor/jszip.min.js"></script>
+    <script src="./app.js?v=reviewhub-20260605-approval"></script>
+  </body>
+</html>

@@ -1,0 +1,34 @@
+# Python / tooling
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
+
+# Local virtual environments
+director_tool_env/
+.venv/
+venv/
+env/
+
+# Build outputs
+build/
+dist/
+*.log
+
+# Local user/runtime data
+settings.json
+*.rev
+*.revpack
+
+# Large external runtimes and models
+FunASR_models/
+FunASR-main/
+Tesseract-OCR/
+external_files/
+Qwen3-VL-8B/
+llama-cpp/
+large-v3-ct2/
+
+# Local archive folder
+old/
+

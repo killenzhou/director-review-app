@@ -1,0 +1,34 @@
+# GUI 框架
+PySide6
+
+# 图像处理和屏幕截图
+Pillow
+mss
+
+# 音频处理和录制
+sounddevice
+numpy
+
+# 语音转文字
+funasr
+modelscope
+torch
+torchaudio
+
+# OCR 图像文字识别
+pytesseract
+
+# AI 服务
+google-generativeai
+openai
+deepseek
+
+# Excel 导出
+openpyxl
+
+# 全局热键
+keyboard
+
+# 打包工具 (我们稍后会用到)
+pyinstaller
+websockets
