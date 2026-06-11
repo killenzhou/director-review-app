@@ -26,15 +26,16 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QToolBar, QHeaderView, QPushButton, QLabel,
     QComboBox, QMessageBox, QSystemTrayIcon, QMenu, QGridLayout, QCheckBox, QStyle,
     QProgressBar, QProgressDialog, QFileDialog, QToolButton, QLineEdit, QStackedWidget, QButtonGroup,
-    QSplitter, QTreeWidget, QTreeWidgetItem, QTextEdit
+    QSplitter, QTreeWidget, QTreeWidgetItem, QTextEdit, QAbstractItemView
 )
 from PySide6.QtGui import QAction, QIcon, QKeySequence, QPixmap
-from PySide6.QtCore import Qt, QEvent, Signal, QTimer, QMimeData, QUrl
+from PySide6.QtCore import Qt, QEvent, Signal, QTimer, QMimeData, QUrl, QItemSelectionModel
 import shiboken6
 
 from settings_dialog import SettingsDialog
+from app_constants import DEFAULT_DEPARTMENTS
 from ai_processor import AIProcessor, LOCAL_AI_PROVIDERS
-from ui_components import HelpDialog, DoodleEditor, CropWindow, RecordingIndicator, AnnotationOverlay, LongVideoTranscriptionDialog, ReviewModePanel
+from ui_components import HelpDialog, DoodleEditor, CropWindow, RecordingIndicator, AnnotationOverlay, LongVideoTranscriptionDialog, ReviewModePanel, DepartmentSelectionDialog
 from recording_manager import RecordingManager, check_ffmpeg_availability
 from project_manager import ProjectManager
 from export_manager import export_to_excel
@@ -109,7 +110,9 @@ MOD_SHIFT = 0x0004
 MOD_ALT = 0x0001
 HOTKEY_REVIEW_ID = 1001
 HOTKEY_ANNOTATION_ID = 1002
+HOTKEY_APPROVE_ID = 1003
 VK_A = 0x41
+VK_P = 0x50
 VK_R = 0x52
 
 COL_SCREENSHOT = 0
@@ -155,6 +158,7 @@ class CustomEvent(QEvent):
 class MainWindow(QMainWindow):
     hotkey_pressed_signal = Signal()
     annotation_hotkey_signal = Signal()
+    approve_hotkey_signal = Signal()
 
     def __init__(self):
         super().__init__()
@@ -171,6 +175,7 @@ class MainWindow(QMainWindow):
         self._registered_hotkeys = []
         self.long_video_dialogs = {}
         self.settings = self.load_settings()
+        self.sync_departments_from_settings()
         self.current_view_mode = "input"
         self._transcription_loading = False
         self._transcription_loading_name = None
@@ -207,6 +212,7 @@ class MainWindow(QMainWindow):
         self._current_cell_value = None
         self.annotation_overlay = None
         self._annotation_capture_busy = False
+        self._approve_capture_busy = False
         self._quiet_capture_state = None
         
     def setup_ui(self):
@@ -242,7 +248,13 @@ class MainWindow(QMainWindow):
         self.input_page = QWidget()
         input_layout = QVBoxLayout(self.input_page)
         input_layout.setContentsMargins(0, 0, 0, 0)
-        input_layout.addWidget(QLabel("当前录入"))
+        input_header_layout = QHBoxLayout()
+        input_header_layout.setContentsMargins(0, 0, 0, 0)
+        input_title = QLabel("当前录入")
+        # self.clear_input_button removed - moved to global toolbar
+        input_header_layout.addWidget(input_title)
+        input_header_layout.addStretch(1)
+        input_layout.addLayout(input_header_layout)
         self.latest_table = QTableWidget()
         self.setup_latest_table()
         input_layout.addWidget(self.latest_table)
@@ -322,6 +334,8 @@ class MainWindow(QMainWindow):
         self.append_revpack_action = QAction("追加导入 revpack", self)
         self.merge_action = QAction("合并相同镜头", self)
         self.annotation_action = QAction("截图批注", self)
+        self.approve_shot_action = QAction("通过当前镜头", self, shortcut=QKeySequence("Ctrl+P"))
+        self.approve_shot_action.setToolTip("直接录入一条通过当前镜头的记录（Ctrl+P）")
         self.import_long_video_action = QAction("导入长视频", self)
         self.transcribe_all_action = QAction("全部转录", self)
         self.ai_process_action = QAction("AI处理", self)
@@ -354,6 +368,7 @@ class MainWindow(QMainWindow):
         self._add_toolbar_menu("审阅", [
             self.merge_action,
             self.annotation_action,
+            self.approve_shot_action,
             self.import_long_video_action,
             self.transcribe_all_action,
         ])
@@ -373,14 +388,16 @@ class MainWindow(QMainWindow):
             self.help_action,
         ])
         self.toolbar.addSeparator()
-        self.toolbar.addWidget(QLabel("语音模型:"))
-        self.whisper_model_selector = QComboBox()
-        self.whisper_model_selector.addItems(["funasr-paraformer-zh"])
-        self.whisper_model_selector.setCurrentText(self.settings.get("selected_model", "funasr-paraformer-zh"))
-        self.toolbar.addWidget(self.whisper_model_selector)
-        self.model_status_label = QLabel("模型: 未加载")
-        self.model_status_label.setStyleSheet("QLabel { color: #7a7f87; padding: 2px 8px; }")
-        self.toolbar.addWidget(self.model_status_label)
+        self.cleanup_temp_action = QAction("清理临时工程", self)
+        self.cleanup_temp_action.triggered.connect(self.cleanup_temp_folders)
+        self.clear_input_action = QAction("清理当前录入 (清屏)", self)
+        self.clear_input_action.triggered.connect(self.confirm_and_clear_input_entries)
+        
+        self._add_toolbar_menu("清理", [
+            self.clear_input_action,
+            self.cleanup_temp_action,
+        ])
+
         integration_menu = QMenu(self)
         integration_menu.addAction(self.cgtw_sync_action)
         integration_menu.addSeparator()
@@ -474,6 +491,7 @@ class MainWindow(QMainWindow):
         self.history_mode_button.clicked.connect(lambda: self.set_view_mode("history"))
         self.review_mode_panel.entry_selected.connect(self.select_review_row_from_review_mode)
         self.annotation_hotkey_signal.connect(self.open_recording_annotation_overlay)
+        self.approve_hotkey_signal.connect(self.record_approved_shot)
         self.new_action.triggered.connect(self.project_manager.new_project)
         self.save_action.triggered.connect(self.handle_save_project)
         self.open_action.triggered.connect(self.handle_open_project)
@@ -483,6 +501,7 @@ class MainWindow(QMainWindow):
         self.web_viewer_action.triggered.connect(self.open_web_viewer)
         self.merge_action.triggered.connect(self.project_manager.merge_duplicate_shots)
         self.annotation_action.triggered.connect(self.open_recording_annotation_overlay)
+        self.approve_shot_action.triggered.connect(self.record_approved_shot)
         self.import_long_video_action.triggered.connect(self.import_long_video_review)
         self.transcribe_all_action.triggered.connect(self.transcribe_all_pending)
         self.ai_process_action.triggered.connect(self.process_all_reviews_with_ai)
@@ -493,14 +512,17 @@ class MainWindow(QMainWindow):
         self.settings_action.triggered.connect(self.open_settings)
         self.undo_action.triggered.connect(self.project_manager.undo)
         self.redo_action.triggered.connect(self.project_manager.redo)
-        self.whisper_model_selector.currentTextChanged.connect(self.on_model_changed)
+
         self.help_action.triggered.connect(lambda: HelpDialog(self).exec())
         self.mobile_connection_action.triggered.connect(self.toggle_mobile_connection)
+        pass # clear_input_button was moved to toolbar action
         self.review_table.doubleClicked.connect(self.handle_table_double_click)
         self.review_table.customContextMenuRequested.connect(self.show_table_context_menu)
+        # self.review_table.cellDoubleClicked.connect(self.on_table_cell_double_clicked)
         self.review_table.currentCellChanged.connect(self.on_table_current_cell_changed)
         self.latest_table.doubleClicked.connect(self.handle_input_table_double_click)
         self.latest_table.customContextMenuRequested.connect(self.show_input_table_context_menu)
+        # self.latest_table.cellDoubleClicked.connect(self.on_input_table_cell_double_clicked)
         self.recording_manager.recording_finished.connect(self.on_recording_finished)
         self.recording_manager.volume_updated.connect(self.update_volume_bar)
         self.recording_manager.error_occurred.connect(self.handle_recording_error)
@@ -528,6 +550,8 @@ class MainWindow(QMainWindow):
         self.review_table.verticalHeader().setDefaultSectionSize(self.settings.get("table_default_row_height", 110))
         self.review_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.review_table.setAlternatingRowColors(True)
+        self.review_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.review_table.setSelectionBehavior(QAbstractItemView.SelectItems)
         self.review_table.setEditTriggers(
             QTableWidget.EditTrigger.DoubleClicked
             | QTableWidget.EditTrigger.EditKeyPressed
@@ -551,6 +575,8 @@ class MainWindow(QMainWindow):
             | QTableWidget.EditTrigger.SelectedClicked
         )
         self.latest_table.setAlternatingRowColors(True)
+        self.latest_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.latest_table.setSelectionBehavior(QAbstractItemView.SelectItems)
         self.latest_table.setContextMenuPolicy(Qt.CustomContextMenu)
         widths = [self._default_table_column_widths()[col] for col in INPUT_TABLE_COLUMNS]
         for col, width in enumerate(widths):
@@ -1124,6 +1150,7 @@ class MainWindow(QMainWindow):
             self.apply_filters()
 
     def refresh_views(self):
+        self.sync_departments_from_settings()
         for entry in self.project_manager.review_entries:
             self._annotate_entry_production_info(entry)
         if hasattr(self, "episode_filter"):
@@ -1314,6 +1341,84 @@ class MainWindow(QMainWindow):
         if hasattr(self, "review_mode_panel") and current_row >= 0:
             self.review_mode_panel.set_current_row(current_row, emit=False)
 
+
+    def on_table_cell_double_clicked(self, row, col):
+        if col == COL_DEPARTMENT:
+            self.open_department_dialog(self.review_table, row, col, row)
+
+    def on_input_table_cell_double_clicked(self, row, col):
+        if col == COL_DEPARTMENT:
+            source_row = self._input_table_source_row(row)
+            if source_row >= 0:
+                self.open_department_dialog(self.latest_table, row, col, source_row)
+
+    def open_department_dialog(self, table, row, col, source_row):
+        available_deps = self.sync_departments_from_settings()
+        if "未分类" not in available_deps:
+            available_deps = ["未分类"] + available_deps
+        entry = self.project_manager.review_entries[source_row]
+        current_dep = entry.get("department", "未分类")
+        
+        from ui_components import DepartmentSelectionDialog
+        dialog = DepartmentSelectionDialog(available_deps, current_dep, self)
+        
+        from PySide6.QtWidgets import QDialog
+        if dialog.exec() == QDialog.Accepted:
+            new_dep = dialog.get_selected_departments()
+            if not new_dep:
+                new_dep = "未分类"
+            rows = self._selected_department_source_rows(table, col, row, source_row)
+            if len(rows) > 1:
+                self.project_manager.update_entries(rows, {"department": new_dep}, snapshot_action="Batch Edit Department")
+            else:
+                self.project_manager.update_entry(source_row, {"department": new_dep}, snapshot_action="Edit Department")
+            if self.project_manager.current_project_file:
+                self.project_manager.save_project(autosave=True)
+            self.apply_filters()
+
+    def cleanup_temp_folders(self):
+            import os
+            import shutil
+            from PySide6.QtWidgets import QMessageBox
+            temp_dir_base = getattr(self.project_manager, 'temp_dir_base', os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp"))
+            if not os.path.exists(temp_dir_base):
+                os.makedirs(temp_dir_base, exist_ok=True)
+                QMessageBox.information(self, "清理", "目前没有历史临时工程，无需清理。")
+                return
+            
+            current_temp = getattr(self.project_manager, 'current_temp_dir', None)
+            to_delete = []
+            total_size = 0
+        
+            for item in os.listdir(temp_dir_base):
+                item_path = os.path.join(temp_dir_base, item)
+                if os.path.isdir(item_path):
+                    # Don't delete if it's currently active
+                    if current_temp and os.path.abspath(item_path) == os.path.abspath(current_temp):
+                        continue
+                    to_delete.append(item_path)
+                    for dirpath, _, filenames in os.walk(item_path):
+                        for f in filenames:
+                            fp = os.path.join(dirpath, f)
+                            if not os.path.islink(fp):
+                                total_size += os.path.getsize(fp)
+                            
+            if not to_delete:
+                QMessageBox.information(self, "清理", "目前只有当前正在使用的临时工程，无需清理。")
+                return
+            
+            size_mb = total_size / (1024 * 1024)
+            reply = QMessageBox.question(self, "确认清理", f"找到了 {len(to_delete)} 个历史无名临时工程（Temp 文件夹）。\n预计可释放 {size_mb:.2f} MB 空间。\n\n是否确定永久删除它们？（此操作不可逆！）")
+            if reply == QMessageBox.Yes:
+                deleted_count = 0
+                for d in to_delete:
+                    try:
+                        shutil.rmtree(d)
+                        deleted_count += 1
+                    except Exception as e:
+                        print(f"Failed to delete {d}: {e}")
+                QMessageBox.information(self, "清理完成", f"成功清理了 {deleted_count} 个历史临时工程。")
+
     def show_table_context_menu(self, pos):
         index = self.review_table.indexAt(pos)
         row, col = index.row(), index.column()
@@ -1343,6 +1448,10 @@ class MainWindow(QMainWindow):
         elif col in [COL_TIMESTAMP, COL_SHOT]:
             context_menu.addAction("自动重新识别").triggered.connect(lambda: self.handle_re_recognize_ocr(row, col))
             context_menu.addAction("选择区域重新识别").triggered.connect(lambda: self.retry_ocr(row, col))
+        elif col == COL_DEPARTMENT:
+            context_menu.addAction("批量设置部门...").triggered.connect(lambda: self.open_department_dialog(self.review_table, row, col, row))
+        elif col == COL_DEPARTMENT:
+            context_menu.addAction("批量设置部门...").triggered.connect(lambda: self.open_department_dialog(self.latest_table, input_row, input_col, row))
         elif col == COL_FULL_REVIEW:
             context_menu.addAction("AI优化此条并替换完整意见").triggered.connect(lambda: self.process_single_review_with_ai(row))
             context_menu.addAction("重新识别录音").triggered.connect(lambda: self.manual_transcribe(row))
@@ -1384,6 +1493,8 @@ class MainWindow(QMainWindow):
         elif col in [COL_TIMESTAMP, COL_SHOT]:
             context_menu.addAction("自动重新识别").triggered.connect(lambda: self.handle_re_recognize_ocr(row, col))
             context_menu.addAction("选择区域重新识别").triggered.connect(lambda: self.retry_ocr(row, col))
+        elif col == COL_DEPARTMENT:
+            context_menu.addAction("批量设置部门...").triggered.connect(lambda: self.open_department_dialog(self.latest_table, input_row, input_col, row))
         elif col == COL_FULL_REVIEW:
             context_menu.addAction("AI优化此条并替换完整意见").triggered.connect(lambda: self.process_single_review_with_ai(row))
             context_menu.addAction("重新识别录音").triggered.connect(lambda: self.manual_transcribe(row))
@@ -1430,6 +1541,28 @@ class MainWindow(QMainWindow):
                 self.project_manager.save_project(autosave=True)
             self.refresh_review_mode()
 
+    def confirm_and_clear_input_entries(self):
+        count = sum(
+            1 for entry in self.project_manager.review_entries
+            if entry.get("entry_type") != "long_video_full"
+        )
+        if count <= 0:
+            self.statusBar().showMessage("当前没有可清除的录入信息。", 3000)
+            return
+        reply = QMessageBox.question(
+            self,
+            "确认清屏",
+            f"确定要清除全部 {count} 条录入信息吗？\n此操作可以撤销。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        cleared_count = self.project_manager.clear_input_entries()
+        if self.project_manager.current_project_file:
+            self.project_manager.save_project(autosave=True)
+        self.statusBar().showMessage(f"已清除 {cleared_count} 条录入信息。", 3000)
+
     def _apply_review_table_edit(self, row, col, new_text):
         if not (0 <= row < self.project_manager.get_entry_count()):
             return
@@ -1461,27 +1594,68 @@ class MainWindow(QMainWindow):
 
 
     def _set_department_combo(self, table, row, col, department, source_row):
-        combo = QComboBox()
-        combo.setEditable(True)
-        combo.setFocusPolicy(Qt.StrongFocus)
-        combo.setStyleSheet("QComboBox { background-color: transparent; border: none; padding-left: 5px; } QComboBox::drop-down { border: none; }")
-        deps = self.settings.get("departments", [])
-        if "未分类" not in deps:
-            deps = ["未分类"] + deps
-        combo.addItems(deps)
-        combo.blockSignals(True)
-        combo.setCurrentText(department)
-        combo.blockSignals(False)
+        item = QTableWidgetItem(department)
         
-        def on_text_changed(text):
-            if hasattr(self, '_is_updating_table') and self._is_updating_table: return
-            self.project_manager.update_entry(source_row, {"department": text}, snapshot_action="Edit Department")
-            if self.project_manager.current_project_file:
-                self.project_manager.save_project(autosave=True)
-            self.apply_filters()
-            
-        combo.currentTextChanged.connect(on_text_changed)
-        table.setCellWidget(row, col, combo)
+        table.setItem(row, col, item)
+    def _selected_department_source_rows(self, table, department_col, changed_table_row, changed_source_row):
+        rows = {changed_source_row}
+        selection_model = table.selectionModel()
+        if not selection_model:
+            return [changed_source_row]
+        for selection_range in table.selectedRanges():
+            if selection_range.leftColumn() <= department_col <= selection_range.rightColumn():
+                for table_row in range(selection_range.topRow(), selection_range.bottomRow() + 1):
+                    source_row = (
+                        self._input_table_source_row(table_row)
+                        if table is getattr(self, "latest_table", None)
+                        else table_row
+                    )
+                    if 0 <= source_row < self.project_manager.get_entry_count():
+                        rows.add(source_row)
+        for index in selection_model.selectedIndexes():
+            if index.column() != department_col:
+                continue
+            source_row = (
+                self._input_table_source_row(index.row())
+                if table is getattr(self, "latest_table", None)
+                else index.row()
+            )
+            if 0 <= source_row < self.project_manager.get_entry_count():
+                rows.add(source_row)
+        if len(rows) <= 1:
+            rows = {changed_source_row}
+        return sorted(rows)
+
+    def eventFilter(self, watched, event):
+        combo = getattr(watched, "_department_combo", None)
+        if combo is None and isinstance(watched, QComboBox):
+            combo = watched
+        if combo is not None and event.type() == QEvent.MouseButtonPress:
+            self._sync_department_combo_selection(combo)
+        return super().eventFilter(watched, event)
+
+    def _sync_department_combo_selection(self, combo):
+        table = getattr(combo, "_department_table", None)
+        row = getattr(combo, "_department_table_row", -1)
+        col = getattr(combo, "_department_table_col", -1)
+        if table is None or row < 0 or col < 0:
+            return
+        index = table.model().index(row, col)
+        selection_model = table.selectionModel()
+        if not index.isValid() or selection_model is None:
+            return
+        modifiers = QApplication.keyboardModifiers()
+        if modifiers & Qt.ControlModifier:
+            flags = QItemSelectionModel.Toggle
+        elif modifiers & Qt.ShiftModifier:
+            flags = QItemSelectionModel.Select
+        elif selection_model.isSelected(index):
+            selection_model.setCurrentIndex(index, QItemSelectionModel.NoUpdate)
+            return
+        else:
+            flags = QItemSelectionModel.ClearAndSelect
+        selection_model.setCurrentIndex(index, QItemSelectionModel.NoUpdate)
+        selection_model.select(index, flags)
 
     def handle_item_changed(self, item):
         if self._is_updating_table:
@@ -1623,6 +1797,7 @@ class MainWindow(QMainWindow):
         dialog = SettingsDialog(self.settings.copy(), self)
         if dialog.exec():
             self.settings.update(dialog.get_settings())
+            self.sync_departments_from_settings()
             self.save_settings()
             self.recording_manager.settings = self.settings
             self.recording_manager.ffmpeg_path = check_ffmpeg_availability(self.settings)
@@ -1695,12 +1870,23 @@ class MainWindow(QMainWindow):
     def _ensure_project_ready_for_assets(self):
         if self.project_manager.current_project_file and self.project_manager.current_temp_dir:
             return True
-        QMessageBox.information(self, "提示", "请先新建或加载一个项目，并保存它。")
-        if not self.handle_save_project():
+        
+        import time, os
+        app_root = os.path.dirname(os.path.abspath(__file__))
+        time_str = time.strftime("%Y%m%d_%H%M%S")
+        project_name = f"auto_{time_str}"
+        temp_dir = os.path.join(app_root, "temp")
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        project_file_path = os.path.join(temp_dir, f"{project_name}.rev")
+        
+        success, msg = self.project_manager.save_project(project_file_path, autosave=True)
+        if not success:
+            QMessageBox.critical(self, "错误", f"无法自动创建临时项目: {msg}")
             return False
-        if not self.project_manager.current_temp_dir:
-            QMessageBox.critical(self, "错误", "无法设定项目临时目录，请重启程序。")
-            return False
+            
+        self.add_recent_project(project_file_path)
+        self.setWindowTitle(f"协同审阅平台 v3.0 (Faster-Whisper) - {project_name}")
         return True
 
     def import_long_video_review(self):
@@ -2272,6 +2458,14 @@ class MainWindow(QMainWindow):
             error_code = ctypes.windll.kernel32.GetLastError()
             print(f"WARNING: 注册快捷键 Ctrl+R 失败，错误码: {error_code}")
 
+        approve_hotkey_label = None
+        if user32.RegisterHotKey(hwnd, HOTKEY_APPROVE_ID, MOD_CONTROL, VK_P):
+            self._registered_hotkeys.append(HOTKEY_APPROVE_ID)
+            approve_hotkey_label = "Ctrl+P"
+        else:
+            error_code = ctypes.windll.kernel32.GetLastError()
+            print(f"WARNING: 注册快捷键 Ctrl+P 失败，错误码: {error_code}")
+
         annotation_candidates = [
             (MOD_CONTROL | MOD_SHIFT, VK_A, "Ctrl+Shift+A"),
             (MOD_CONTROL | MOD_ALT, VK_A, "Ctrl+Alt+A"),
@@ -2288,7 +2482,8 @@ class MainWindow(QMainWindow):
             print(f"WARNING: 截图批注全局快捷键注册失败（{'; '.join(annotation_failures)}），请使用工具栏“截图批注”按钮。")
         if self._registered_hotkeys:
             annotation_label = self._annotation_hotkey_label or "工具栏按钮"
-            print(f"协同审阅平台已激活。快捷键: Ctrl+R (审阅), {annotation_label} (截图批注)")
+            approve_label = approve_hotkey_label or "工具栏按钮"
+            print(f"协同审阅平台已激活。快捷键: Ctrl+R (审阅), {annotation_label} (截图批注), {approve_label} (通过当前镜头)")
 
     def unregister_hotkeys(self):
         if sys.platform != "win32" or not self._registered_hotkeys:
@@ -2311,6 +2506,9 @@ class MainWindow(QMainWindow):
                     return True, 0
                 if msg.wParam == HOTKEY_ANNOTATION_ID:
                     self.annotation_hotkey_signal.emit()
+                    return True, 0
+                if msg.wParam == HOTKEY_APPROVE_ID:
+                    self.approve_hotkey_signal.emit()
                     return True, 0
         return super().nativeEvent(event_type, message)
 
@@ -2339,19 +2537,55 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
         self.setWindowOpacity(previous_opacity)
 
+    def _selected_recording_monitor(self, sct):
+        monitor_index = self.settings.get("screen_record_monitor", 0)
+        try:
+            monitor_index = int(monitor_index)
+        except (TypeError, ValueError):
+            monitor_index = 0
+        if monitor_index < 0 or monitor_index >= len(sct.monitors):
+            monitor_index = 0
+        return dict(sct.monitors[monitor_index])
+
     def toggle_review_capture(self):
         if self.recording_manager.is_recording():
             self.recording_manager.stop()
             self.statusBar().showMessage("正在处理...", 0)
             self.update_recording_ui_state(False)
+            self.showNormal()
+            self.activateWindow()
         else:
             if not self._ensure_project_ready_for_assets():
                 return
             should_record_video = self.record_video_checkbox.isChecked()
             status_text = self.recording_manager.start(should_record_video, self.project_manager.current_temp_dir)
             if status_text:
+                self.showMinimized()
+                self._activate_davinci()
                 self.update_recording_ui_state(True, status_text)
                 self.statusBar().showMessage(status_text, 0)
+
+    def _activate_davinci(self):
+        if sys.platform != "win32": return
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+            def callback(hwnd, lparam):
+                if user32.IsWindowVisible(hwnd):
+                    length = user32.GetWindowTextLengthW(hwnd)
+                    if length > 0:
+                        buff = ctypes.create_unicode_buffer(length + 1)
+                        user32.GetWindowTextW(hwnd, buff, length + 1)
+                        if "DaVinci Resolve" in buff.value:
+                            user32.ShowWindow(hwnd, 9)
+                            user32.SetForegroundWindow(hwnd)
+                            return False
+                return True
+            user32.EnumWindows(WNDENUMPROC(callback), 0)
+        except Exception as e:
+            print(f"Failed to activate DaVinci Resolve: {e}")
 
     def open_recording_annotation_overlay(self):
         if self._annotation_capture_busy:
@@ -2364,34 +2598,42 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 self.annotation_overlay = None
 
-        if not self.recording_manager.is_recording():
-            self._direct_annotation_mode = True
-        else:
-            self._direct_annotation_mode = False
-
         if self.annotation_overlay and self.annotation_overlay.isVisible():
-            self.annotation_overlay.activateWindow()
+            self.annotation_overlay.close()
             return
         if not self.project_manager.current_temp_dir:
             QMessageBox.warning(self, "无法批注", "项目临时目录未设置，请先保存项目。")
             return
+
         self._annotation_capture_busy = True
         self._quiet_capture_state = self._begin_quiet_capture_window_state()
+
+        if not self.recording_manager.is_recording():
+            self.toggle_review_capture()
+            QApplication.processEvents()
+            import time
+            time.sleep(0.3)
+            self._direct_annotation_mode = False
+        else:
+            self._direct_annotation_mode = False
+
         try:
             import mss
+            import time
             with mss.mss() as sct:
-                monitor_index = self.settings.get("screen_record_monitor", 0)
-                if monitor_index >= len(sct.monitors):
-                    monitor_index = 0
-                monitor = sct.monitors[monitor_index]
+                monitor = self._selected_recording_monitor(sct)
                 sct_img = sct.grab(monitor)
                 img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
-                if self._direct_annotation_mode:
-                    pending_dir = os.path.join(self.project_manager.current_temp_dir, "snapshots")
-                else:
-                    pending_dir = os.path.join(self.project_manager.current_temp_dir, "_pending_annotations")
+                
+                max_width = 1280
+                if img.width > max_width:
+                    ratio = max_width / img.width
+                    new_height = int(img.height * ratio)
+                    img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
+
+                pending_dir = os.path.join(self.project_manager.current_temp_dir, "_pending_annotations")
                 os.makedirs(pending_dir, exist_ok=True)
-                capture_path = os.path.join(pending_dir, f"direct_snap_{int(time.time())}.png" if self._direct_annotation_mode else f"annotation_source_{int(time.time())}.png")
+                capture_path = os.path.join(pending_dir, f"annotation_source_{int(time.time())}.png")
                 img.save(capture_path, quality=95)
         except Exception as e:
             self._annotation_capture_busy = False
@@ -2399,15 +2641,22 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "截图失败", f"无法创建批注截图:\n{e}")
             return
 
-        self.annotation_overlay = AnnotationOverlay(capture_path, os.path.dirname(capture_path), None)
+        self.annotation_overlay = AnnotationOverlay(
+            capture_path,
+            os.path.dirname(capture_path),
+            None,
+            screen_geometry=monitor,
+        )
         self.annotation_overlay.destroyed.connect(self.on_annotation_overlay_closed)
         self.annotation_overlay.annotation_saved.connect(self.on_recording_annotation_saved)
-        self.annotation_overlay.show()
 
     def on_annotation_overlay_closed(self):
         self.annotation_overlay = None
         self._annotation_capture_busy = False
-        QTimer.singleShot(80, lambda: self._restore_quiet_capture_window_state())
+        def restore_and_activate():
+            self._restore_quiet_capture_window_state()
+            self._activate_davinci()
+        QTimer.singleShot(80, restore_and_activate)
 
     def on_recording_annotation_saved(self, annotated_path):
         if not annotated_path or not os.path.exists(annotated_path):
@@ -2434,6 +2683,63 @@ class MainWindow(QMainWindow):
 
     def on_recording_finished(self, data):
         threading.Thread(target=self.process_ocr_task, args=(data,), daemon=True).start()
+
+    def record_approved_shot(self):
+        if self._approve_capture_busy:
+            return
+        if self.recording_manager.is_recording():
+            QMessageBox.information(self, "正在录制", "请先结束当前审阅录制，再录入通过镜头。")
+            return
+        if not self._ensure_project_ready_for_assets():
+            return
+        self._approve_capture_busy = True
+        quiet_state = self._begin_quiet_capture_window_state()
+        try:
+            import mss
+            with mss.mss() as sct:
+                monitor = self._selected_recording_monitor(sct)
+                sct_img = sct.grab(monitor)
+                img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+                max_width = 1280
+                if img.width > max_width:
+                    ratio = max_width / img.width
+                    new_height = int(img.height * ratio)
+                    img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
+                pending_dir = os.path.join(self.project_manager.current_temp_dir, "snapshots")
+                os.makedirs(pending_dir, exist_ok=True)
+                capture_path = os.path.join(pending_dir, f"approved_snap_{int(time.time())}.png")
+                img.save(capture_path, quality=95)
+        except Exception as e:
+            self._approve_capture_busy = False
+            self._restore_quiet_capture_window_state(quiet_state)
+            QMessageBox.critical(self, "截图失败", f"无法录入通过镜头:\n{e}")
+            return
+        self._restore_quiet_capture_window_state(quiet_state)
+        review_data = {
+            "entry_type": "direct_approve",
+            "screenshot_path": capture_path,
+            "audio_path": None,
+            "media_files": [],
+            "reference_files": [],
+            "full_review": "通过",
+            "simplified_review": "通过",
+            "keywords": ["通过"],
+            "department": "未分类",
+            "timestamp": "未识别",
+            "shot_number": "UNASSIGNED",
+            "approved": True,
+            "review_outcome": "approved",
+            "review_status": "approved",
+            "approved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self.statusBar().showMessage("正在录入通过镜头并识别镜头号...", 0)
+        threading.Thread(target=self.process_approved_shot_task, args=(review_data,), daemon=True).start()
+
+    def process_approved_shot_task(self, review_data):
+        try:
+            self.process_ocr_task(review_data)
+        finally:
+            self._approve_capture_busy = False
 
     def process_ocr_task(self, review_data):
         try:
@@ -2501,7 +2807,7 @@ class MainWindow(QMainWindow):
                 new_reference_rel_paths.append(rel_path)
         review_data["reference_files"] = review_data.get("reference_files", []) + new_reference_rel_paths
         review_data.pop("pending_reference_files", None)
-        review_data["full_review"] = ""
+        review_data["full_review"] = review_data.get("full_review", "")
         QApplication.instance().postEvent(self, CustomEvent(review_data, ADD_REVIEW_EVENT_TYPE))
 
     def manual_transcribe(self, row):
@@ -2898,7 +3204,7 @@ class MainWindow(QMainWindow):
             "api_key": "local", "base_url": DEFAULT_LOCAL_AI_BASE_URL, "model_name": DEFAULT_QWEN_MODEL, 
             "realtime_transcribe": True, "screen_record_fps": 25, 
             "screen_record_monitor": 0, "ffmpeg_path": "", 
-            "departments": ["解算", "动画", "合成", "灯光", "特效", "UE特效", "传统特效", "调色", "AE", "AI", "组装", "地编"],
+            "departments": DEFAULT_DEPARTMENTS.copy(),
             "audio_device_index": None,
             "shot_number_crop_rect": None, "timestamp_crop_rect": None,
             "transcription_device": "auto", "transcription_compute_type": "auto",
@@ -2919,6 +3225,7 @@ class MainWindow(QMainWindow):
                     loaded_settings = json.load(f)
                     settings = default_settings | loaded_settings
                     settings["cgtw_sync"] = default_cgtw_settings() | loaded_settings.get("cgtw_sync", {})
+                    settings["departments"] = DEFAULT_DEPARTMENTS.copy()
                     if (
                         settings.get("ai_provider") in LOCAL_AI_PROVIDERS
                         and settings.get("base_url") in {"http://127.0.0.1:1234/v1", "http://127.0.0.1:1234"}
@@ -2935,6 +3242,11 @@ class MainWindow(QMainWindow):
                 return default_settings
         except Exception:
             return default_settings
+
+    def sync_departments_from_settings(self):
+        departments = DEFAULT_DEPARTMENTS.copy()
+        self.settings["departments"] = departments
+        return departments
 
     def save_settings(self):
         try:
@@ -3703,7 +4015,11 @@ class MainWindow(QMainWindow):
         if event_type == ADD_REVIEW_EVENT_TYPE:
             new_row_index = self.project_manager.get_entry_count()
             self.project_manager.add_review_entry(event.data)
-            if self.settings.get("realtime_transcribe", True):
+            if event.data.get("approved"):
+                if self.project_manager.current_project_file:
+                    self.project_manager.save_project(autosave=True)
+                self.statusBar().showMessage("已录入通过镜头。", 5000)
+            elif self.settings.get("realtime_transcribe", True):
                 self.manual_transcribe(new_row_index)
             return True
         elif event_type == MODEL_LOAD_STATUS_EVENT_TYPE:

@@ -20,6 +20,7 @@ SUPPORTED_CGTW_PYTHON = {
     (3, 12),
 }
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff"}
+APPROVED_CGTW_STATUS = "审核通过"
 
 
 def default_cgtw_settings():
@@ -230,7 +231,7 @@ def prepare_cgtw_payload(review_entries, temp_dir, settings):
                 "shot_number": shot_number,
                 "cgtw_shot_number": _normalize_cgtw_shot_number(shot_number),
                 "filter": _build_task_filter(config, _normalize_cgtw_shot_number(shot_number), temp_entry),
-                "note_blocks": note_blocks if not is_approved else [{"type": "text", "content": f"[协同审阅平台同步]\n镜头号: {shot_number}\n状态: 通过"}],
+                "note_blocks": note_blocks if not is_approved else [{"type": "text", "content": f"[协同审阅平台同步]\n镜头号: {shot_number}\n状态: {APPROVED_CGTW_STATUS}"}],
                 "image_paths": image_paths if not is_approved else [],
                 "submit_paths": existing_paths if not is_approved else [],
                 "missing_paths": missing_paths if not is_approved else [],
@@ -466,7 +467,7 @@ def _sync_one_item(tw, config, item):
             field_sign = str(config.get("flow_field_sign") or "task.supervise_status").strip()
             status = str(config.get("flow_status") or config.get("target_status") or "内部返修").strip()
             if item.get("is_approved"):
-                status = "通过"
+                status = APPROVED_CGTW_STATUS
             if not field_sign or not status:
                 result["error"] = "未配置 CGTeamWork 流程反馈字段或状态"
                 return result
@@ -484,7 +485,7 @@ def _sync_one_item(tw, config, item):
             field_sign = str(config.get("flow_field_sign") or "task.supervise_status").strip()
             status = str(config.get("flow_status") or config.get("target_status") or "内部返修").strip()
             if item.get("is_approved"):
-                status = "通过"
+                status = APPROVED_CGTW_STATUS
             if not field_sign or not status:
                 result["error"] = "未配置 CGTeamWork 字段或状态"
                 return result
@@ -567,7 +568,9 @@ def _normalize_cgtw_shot_number(shot_number):
     match = re.fullmatch(r"(?i)ep(\d+)_sc(\d+)_(\d+)", text)
     if match:
         ep, sc, shot = match.groups()
-        return f"Ep{ep}_sc{sc}_{shot}"
+        if len(shot) > 3 and shot.startswith("0"):
+            shot = shot[-3:]
+        return f"Ep{ep.zfill(3)}_sc{sc.zfill(3)}_{shot.zfill(3)}"
     return text
 
 

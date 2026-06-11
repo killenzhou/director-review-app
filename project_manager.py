@@ -133,6 +133,8 @@ class ProjectManager:
 
             loaded_settings = project_data.get("settings", {})
             self.main_window.settings.update(loaded_settings)
+            if hasattr(self.main_window, "sync_departments_from_settings"):
+                self.main_window.sync_departments_from_settings()
             self.source_revpack_collection = project_data.get("source_revpack_collection", [])
             
             self.current_project_file = file_path
@@ -446,6 +448,19 @@ class ProjectManager:
             del self.review_entries[row]
             self.update_table_display()
 
+    def clear_input_entries(self):
+        rows_to_keep = [
+            entry for entry in self.review_entries
+            if entry.get("entry_type") == "long_video_full"
+        ]
+        cleared_count = len(self.review_entries) - len(rows_to_keep)
+        if cleared_count <= 0:
+            return 0
+        self._snapshot_state("Clear Input Entries")
+        self.review_entries = rows_to_keep
+        self.update_table_display()
+        return cleared_count
+
     def update_entry(self, row, update_data, snapshot_action=None):
         if 0 <= row < len(self.review_entries):
             if snapshot_action:
@@ -454,6 +469,19 @@ class ProjectManager:
             self.main_window.populate_row(row, self.review_entries[row])
             if hasattr(self.main_window, "refresh_views"):
                 self.main_window.refresh_views()
+
+    def update_entries(self, rows, update_data, snapshot_action=None):
+        valid_rows = sorted({
+            row for row in rows
+            if isinstance(row, int) and 0 <= row < len(self.review_entries)
+        })
+        if not valid_rows:
+            return
+        if snapshot_action:
+            self._snapshot_state(snapshot_action)
+        for row in valid_rows:
+            self.review_entries[row].update(update_data)
+        self.update_table_display()
 
     def add_reference_file(self, row, file_paths):
         if 0 <= row < len(self.review_entries):

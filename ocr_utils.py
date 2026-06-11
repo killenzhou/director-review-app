@@ -165,20 +165,27 @@ def find_timestamp(raw_text):
     if match := re.search(r'(\d{1,2}:\d{2})', raw_text): return match.group(1)
     return "未识别"
 
+def _canonical_shot_number(ep, sc, shot):
+    shot = str(shot or "").strip()
+    if shot.isdigit():
+        shot = shot[-3:] if len(shot) > 3 and shot.startswith("0") else shot.zfill(3)
+    return f"Ep{str(ep).zfill(3)}_sc{str(sc).zfill(3)}_{shot}"
+
 def _extract_production_shot_number(raw_text):
-    # EP01_SC001_0010, EP1_SC1_1
-    if match := re.search(r'([Ee][Pp]\d{1,3}[\W_]*[Ss][Cc]\d{1,4}[\W_]*\d{1,4})', raw_text, re.IGNORECASE):
-        return re.sub(r'[\W_]+', '_', match.group(1)).upper()
+    # Ep001_sc001_010, EP1-SC1-10
+    if match := re.search(r'[Ee][Pp]\D*(\d{1,3})\D*[Ss][Cc]\D*(\d{1,4})\D+(\d{1,4})', raw_text, re.IGNORECASE):
+        ep, sc, shot = match.groups()
+        return _canonical_shot_number(ep, sc, shot)
     return None
 
 def _format_director_shot_number(raw_text):
     # Flexible matching for "ep 1 sc 2 30"
     if match := re.search(r"[Ee][Pp]?\D*(\d+)\D*[Ss][Cc]?\D*(\d+)\D*(\d+)", raw_text, re.IGNORECASE):
         ep, sc, shot = match.groups()
-        return f"EP{ep.zfill(2)}_SC{sc.zfill(3)}_{shot.zfill(4)}"
+        return _canonical_shot_number(ep, sc, shot)
     # Match three numbers in a row as a fallback
     if len(numbers := re.findall(r'\d+', raw_text)) >= 3:
-        return f"EP{numbers[0].zfill(2)}_SC{numbers[1].zfill(3)}_{numbers[2].zfill(4)}"
+        return _canonical_shot_number(numbers[0], numbers[1], numbers[2])
     return None
 
 def extract_shot_number(raw_text):
